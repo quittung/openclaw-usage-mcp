@@ -71,3 +71,16 @@ OPENCLAW_TOKEN=your-token python3 server.py
 ```
 
 Communicates over stdio using the MCP protocol.
+
+## How it works (and why)
+
+OpenClaw's gateway exposes a WebSocket RPC protocol — the same one all first-party clients (CLI, web UI, mobile apps) use. This server connects as a `cli` client with an operator token and calls the `usage.cost` and `sessions.usage` RPC methods.
+
+There are simpler alternatives (`openclaw sessions --json`, the HTTP `/tools/invoke` endpoint), but they only expose token counts. The WebSocket RPC is the only way to get dollar cost breakdowns, per-model usage, daily aggregations, and the other rich data the tools here return.
+
+That said, OpenClaw moves fast — this approach may well be superseded by a proper REST API or dedicated MCP integration before long.
+
+## Limitations
+
+- **Broad scopes**: We request `operator.admin`, `operator.approvals`, and `operator.pairing` scopes even though we only need usage read access. Narrower scopes were rejected during testing. Worth revisiting if OpenClaw adds a dedicated `usage.read` scope.
+- **No WebSocket keepalive**: The connection stays open between tool calls with no periodic ping. Long-lived MCP server processes may hit silent connection staleness. The auto-reconnect handles it reactively (retries once on failure), but a proactive ping would be more robust.

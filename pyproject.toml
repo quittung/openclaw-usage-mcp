@@ -7,6 +7,3 @@ dependencies = [
     "mcp>=1.0",
     "websockets>=13",
 ]
-
-[project.scripts]
-openclaw-usage-mcp = "server:mcp.run"

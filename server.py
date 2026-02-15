@@ -6,6 +6,7 @@ import json
 import os
 import uuid
 from datetime import date
+from urllib.parse import urlparse
 
 import websockets
 from mcp.server.fastmcp import FastMCP
@@ -24,7 +25,9 @@ class OpenClawClient:
         self._lock = asyncio.Lock()
 
     async def _connect(self):
-        extra_headers = {"Origin": "http://localhost:18789"}
+        parsed = urlparse(self.url)
+        origin = f"http://{parsed.hostname}:{parsed.port or 80}"
+        extra_headers = {"Origin": origin}
         self._ws = await websockets.connect(self.url, additional_headers=extra_headers)
         # Complete handshake before starting reader loop to avoid recv() races
         await self._auth_handshake()

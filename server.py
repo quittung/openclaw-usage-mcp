@@ -23,17 +23,28 @@ class OpenClawClient:
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
+    async def _connect(self):
+        extra_headers = {"Origin": "http://localhost:18789"}
+        self._ws = await websockets.connect(self.url, additional_headers=extra_headers)
+        # Complete handshake before starting reader loop to avoid recv() races
+        await self._auth_handshake()
+        self._reader_task = asyncio.create_task(self._reader_loop())
+
+    async def _disconnect(self):
+        if self._reader_task:
+            self._reader_task.cancel()
+            self._reader_task = None
+        if self._ws:
+            await self._ws.close()
+            self._ws = None
+
     async def _ensure_connected(self):
         if self._ws is not None:
             return
         async with self._lock:
             if self._ws is not None:
                 return
-            extra_headers = {"Origin": "http://localhost:18789"}
-            self._ws = await websockets.connect(self.url, additional_headers=extra_headers)
-            # Complete handshake before starting reader loop to avoid recv() races
-            await self._auth_handshake()
-            self._reader_task = asyncio.create_task(self._reader_loop())
+            await self._connect()
 
     async def _reader_loop(self):
         try:
@@ -82,23 +93,29 @@ class OpenClawClient:
                 return
 
     async def request(self, method: str, params: dict) -> dict:
-        await self._ensure_connected()
-        req_id = str(uuid.uuid4())
-        fut = asyncio.get_event_loop().create_future()
-        self._pending[req_id] = fut
-        msg = json.dumps({"type": "req", "id": req_id, "method": method, "params": params})
-        await self._ws.send(msg)
-        resp = await asyncio.wait_for(fut, timeout=30)
-        if not resp.get("ok", False):
-            raise RuntimeError(f"RPC {method} failed: {resp.get('error')}")
-        return resp.get("payload", {})
+        last_err = None
+        for attempt in range(2):
+            await self._ensure_connected()
+            req_id = str(uuid.uuid4())
+            fut = asyncio.get_event_loop().create_future()
+            self._pending[req_id] = fut
+            try:
+                await self._ws.send(json.dumps({
+                    "type": "req", "id": req_id, "method": method, "params": params,
+                }))
+                resp = await asyncio.wait_for(fut, timeout=30)
+            except (ConnectionError, websockets.ConnectionClosed, asyncio.TimeoutError) as e:
+                self._pending.pop(req_id, None)
+                last_err = e
+                await self._disconnect()
+                continue
+            if not resp.get("ok", False):
+                raise RuntimeError(f"RPC {method} failed: {resp.get('error')}")
+            return resp.get("payload", {})
+        raise ConnectionError(f"Failed after reconnect: {last_err}")
 
     async def close(self):
-        if self._reader_task:
-            self._reader_task.cancel()
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        await self._disconnect()
 
 
 # ---------------------------------------------------------------------------
@@ -113,7 +130,9 @@ def _get_client() -> OpenClawClient:
     global _client
     if _client is None:
         url = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
-        token = os.environ["OPENCLAW_TOKEN"]
+        token = os.environ.get("OPENCLAW_TOKEN")
+        if not token:
+            raise SystemExit("OPENCLAW_TOKEN env var is required")
         _client = OpenClawClient(url, token)
     return _client
 

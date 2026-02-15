@@ -79,7 +79,7 @@ class OpenClawClient:
             "type": "req", "id": req_id, "method": "connect",
             "params": {
                 "minProtocol": 3, "maxProtocol": 3,
-                "client": {"id": "webchat-ui", "version": "0.1", "platform": "linux", "mode": "webchat"},
+                "client": {"id": "cli", "version": "0.1", "platform": "linux", "mode": "cli"},
                 "role": "operator",
                 "scopes": ["operator.admin", "operator.approvals", "operator.pairing"],
                 "auth": {"token": self.token},

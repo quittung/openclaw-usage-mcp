@@ -6,31 +6,29 @@ import json
 import os
 import uuid
 from datetime import date
-from urllib.parse import urlparse
+from pathlib import Path
 
 import websockets
 from mcp.server.fastmcp import FastMCP
+
+import device_auth
 
 # ---------------------------------------------------------------------------
 # OpenClaw WebSocket client
 # ---------------------------------------------------------------------------
 
 class OpenClawClient:
-    def __init__(self, url: str, token: str):
+    def __init__(self, url: str, credentials_path: Path):
         self.url = url
-        self.token = token
+        self.credentials_path = credentials_path
+        self._creds: device_auth.DeviceCredentials | None = None
         self._ws = None
         self._pending: dict[str, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
         self._lock = asyncio.Lock()
 
     async def _connect(self):
-        parsed = urlparse(self.url)
-        origin = f"http://{parsed.hostname}:{parsed.port or 80}"
-        extra_headers = {"Origin": origin}
-        self._ws = await websockets.connect(self.url, additional_headers=extra_headers)
-        # Complete handshake before starting reader loop to avoid recv() races
-        await self._auth_handshake()
+        self._ws = await device_auth.connect(self.url, self._creds)
         self._reader_task = asyncio.create_task(self._reader_loop())
 
     async def _disconnect(self):
@@ -47,6 +45,8 @@ class OpenClawClient:
         async with self._lock:
             if self._ws is not None:
                 return
+            if self._creds is None:
+                self._creds = await device_auth.bootstrap(self.url, self.credentials_path)
             await self._connect()
 
     async def _reader_loop(self):
@@ -64,36 +64,6 @@ class OpenClawClient:
                 if not fut.done():
                     fut.set_exception(ConnectionError("WebSocket closed"))
             self._pending.clear()
-
-    async def _auth_handshake(self):
-        # Wait for connect.challenge event
-        while True:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=5)
-            msg = json.loads(raw)
-            if msg.get("type") == "event" and msg.get("event") == "connect.challenge":
-                break
-
-        # Send connect request and read response directly (reader loop not yet running)
-        req_id = str(uuid.uuid4())
-        await self._ws.send(json.dumps({
-            "type": "req", "id": req_id, "method": "connect",
-            "params": {
-                "minProtocol": 3, "maxProtocol": 3,
-                "client": {"id": "cli", "version": "0.1", "platform": "linux", "mode": "cli"},
-                "role": "operator",
-                "scopes": ["operator.admin", "operator.approvals", "operator.pairing"],
-                "auth": {"token": self.token},
-            },
-        }))
-
-        # Read until we get our connect response (skip interleaved events)
-        while True:
-            raw = await asyncio.wait_for(self._ws.recv(), timeout=10)
-            msg = json.loads(raw)
-            if msg.get("type") == "res" and msg.get("id") == req_id:
-                if not msg.get("ok"):
-                    raise RuntimeError(f"Auth failed: {msg.get('error')}")
-                return
 
     async def request(self, method: str, params: dict) -> dict:
         last_err = None
@@ -133,10 +103,7 @@ def _get_client() -> OpenClawClient:
     global _client
     if _client is None:
         url = os.environ.get("OPENCLAW_GATEWAY_URL", "ws://localhost:18789")
-        token = os.environ.get("OPENCLAW_TOKEN")
-        if not token:
-            raise SystemExit("OPENCLAW_TOKEN env var is required")
-        _client = OpenClawClient(url, token)
+        _client = OpenClawClient(url, device_auth.CREDENTIALS_PATH)
     return _client
 
 

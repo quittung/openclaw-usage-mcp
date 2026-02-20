@@ -25,12 +25,15 @@ pip install mcp websockets
 
 ### 2. Configure
 
-The server reads two environment variables:
+The server reads these environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `OPENCLAW_GATEWAY_URL` | `ws://localhost:18789` | WebSocket URL of the OpenClaw gateway |
-| `OPENCLAW_TOKEN` | *(required)* | Gateway operator token |
+| `OPENCLAW_USAGE_MCP_CREDENTIALS` | `~/.config/openclaw-usage-mcp/device.json` | Path to store the device credentials |
+
+No token configuration needed. On first run the server pairs itself with the
+gateway automatically (see **First-run pairing** below).
 
 ### 3. Register with your MCP client
 
@@ -64,17 +67,33 @@ mcporter config add usage \
 
 The token stays in the MCP server config — the AI agent only sees the tool interfaces, never the credentials.
 
+## First-run pairing
+
+On first run the server generates an Ed25519 device identity, registers it
+with the gateway, and self-approves via the OpenClaw CLI — no manual steps
+needed:
+
+```
+[device_auth] No credentials at ~/.config/openclaw-usage-mcp/device.json. Starting pairing flow...
+[device_auth] Approving pairing request 9dfb60cb-...
+[device_auth] Paired successfully. Device ID: e108b6ca...
+```
+
+Credentials are stored at `~/.config/openclaw-usage-mcp/device.json` and
+reused on all subsequent runs. The device appears in `openclaw devices list`
+as `openclaw-usage-mcp` with `operator.read` scope only.
+
 ## Running standalone
 
 ```bash
-OPENCLAW_TOKEN=your-token python3 server.py
+python3 server.py
 ```
 
 Communicates over stdio using the MCP protocol.
 
 ## How it works (and why)
 
-OpenClaw's gateway exposes a WebSocket RPC protocol — the same one all first-party clients (CLI, web UI, mobile apps) use. This server connects as a `cli` client with an operator token and calls the `usage.cost` and `sessions.usage` RPC methods.
+OpenClaw's gateway exposes a WebSocket RPC protocol — the same one all first-party clients (CLI, web UI, mobile apps) use. This server pairs as a named device (`openclaw-usage-mcp`) with `operator.read` scope only, then calls the `usage.cost` and `sessions.usage` RPC methods.
 
 There are simpler alternatives (`openclaw sessions --json`, the HTTP `/tools/invoke` endpoint), but they only expose token counts. The WebSocket RPC is the only way to get dollar cost breakdowns, per-model usage, daily aggregations, and the other rich data the tools here return.
 
@@ -82,5 +101,5 @@ That said, OpenClaw moves fast — this approach may well be superseded by a pro
 
 ## Limitations
 
-- **Broad scopes**: We request `operator.admin`, `operator.approvals`, and `operator.pairing` scopes even though we only need usage read access. Narrower scopes were rejected during testing. Worth revisiting if OpenClaw adds a dedicated `usage.read` scope.
+- **Scopes**: The device is paired with `operator.read` only — the minimum required for usage/cost RPC calls.
 - **No WebSocket keepalive**: The connection stays open between tool calls with no periodic ping. Long-lived MCP server processes may hit silent connection staleness. The auto-reconnect handles it reactively (retries once on failure), but a proactive ping would be more robust.

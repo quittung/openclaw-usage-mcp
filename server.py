@@ -140,11 +140,12 @@ def _period_label(b_start: date, b_end: date, period: str) -> str:
     return f"{b_start} – {b_end}"
 
 
-def _extract_model_usage(entry: dict) -> tuple[dict, float]:
-    """Extract (tokens_dict, cost) from a byModel entry.
+def _extract_model_usage(entry: dict) -> tuple[dict, dict, float]:
+    """Extract (tokens_dict, cost_by_type_dict, total_cost) from a byModel entry.
 
     byModel entries have a nested 'totals' object with fields:
-      input, output, cacheRead, cacheWrite, totalCost
+      input, output, cacheRead, cacheWrite,
+      inputCost, outputCost, cacheReadCost, cacheWriteCost, totalCost
     """
     totals = entry.get("totals", entry)  # fall back to flat entry if no 'totals'
     tokens = {}
@@ -152,8 +153,14 @@ def _extract_model_usage(entry: dict) -> tuple[dict, float]:
         val = totals.get(key)
         if val:
             tokens[key] = val
-    cost = totals.get("totalCost") or totals.get("cost") or 0.0
-    return tokens, cost
+    cost_by_type = {}
+    for key, field in [("input", "inputCost"), ("output", "outputCost"),
+                        ("cacheRead", "cacheReadCost"), ("cacheWrite", "cacheWriteCost")]:
+        val = totals.get(field)
+        if val:
+            cost_by_type[key] = val
+    total_cost = totals.get("totalCost") or totals.get("cost") or 0.0
+    return tokens, cost_by_type, total_cost
 
 
 # ---------------------------------------------------------------------------
@@ -205,26 +212,31 @@ async def get_usage(
         by_model = data.get("aggregates", {}).get("byModel", [])
 
         totals_tokens: dict[str, int] = {}
+        totals_cost_by_type: dict[str, float] = {}
         totals_cost = 0.0
         models_out = []
 
         for m in by_model:
-            tokens, cost = _extract_model_usage(m)
+            tokens, cost_by_type, cost = _extract_model_usage(m)
             totals_cost += cost
             for k, v in tokens.items():
                 totals_tokens[k] = totals_tokens.get(k, 0) + v
+            for k, v in cost_by_type.items():
+                totals_cost_by_type[k] = totals_cost_by_type.get(k, 0.0) + v
             if tokens or cost:  # skip zero-usage entries
                 models_out.append({
                     "model": m.get("model") or m.get("modelId", "unknown"),
                     "tokens": tokens,
-                    "cost": round(cost, 6),
+                    "cost": {**{k: round(v, 6) for k, v in cost_by_type.items()},
+                             "total": round(cost, 6)},
                 })
 
         result_periods.append({
             "period": _period_label(b_start, b_end, period),
             "totals": {
                 "tokens": totals_tokens,
-                "cost": round(totals_cost, 6),
+                "cost": {**{k: round(v, 6) for k, v in totals_cost_by_type.items()},
+                         "total": round(totals_cost, 6)},
             },
             "by_model": models_out,
         })

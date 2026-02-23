@@ -244,25 +244,132 @@ async def get_usage(
     return json.dumps(result_periods, indent=2)
 
 
+def _build_session_entry(session: dict) -> dict:
+    """Build a compact session summary from a raw gateway session object."""
+    usage = session.get("usage", session)
+    tokens, cost_by_type, total_cost = _extract_model_usage(usage)
+
+    models_out = []
+    for m in usage.get("modelUsage", []):
+        m_tokens, m_cost_by_type, m_cost = _extract_model_usage(m.get("totals", m))
+        if m_tokens or m_cost:
+            models_out.append({
+                "model": m.get("model", "unknown"),
+                "tokens": m_tokens,
+                "cost": {**{k: round(v, 6) for k, v in m_cost_by_type.items()},
+                         "total": round(m_cost, 6)},
+            })
+
+    entry: dict = {
+        "key": session.get("key", ""),
+        "model": session.get("model", "unknown"),
+        "channel": session.get("channel", ""),
+    }
+    msgs = usage.get("messageCounts")
+    if msgs and msgs.get("total"):
+        entry["messages"] = msgs["total"]
+    entry["tokens"] = tokens
+    entry["cost"] = {**{k: round(v, 6) for k, v in cost_by_type.items()},
+                     "total": round(total_cost, 6)}
+    if len(models_out) > 1:
+        entry["by_model"] = models_out
+    return entry
+
+
+def _aggregate_sessions(sessions: list[dict]) -> dict:
+    """Aggregate a list of session entries into a single 'other' summary."""
+    agg_tokens: dict[str, int] = {}
+    agg_cost_by_type: dict[str, float] = {}
+    agg_cost = 0.0
+    agg_messages = 0
+    for s in sessions:
+        for k, v in s.get("tokens", {}).items():
+            agg_tokens[k] = agg_tokens.get(k, 0) + v
+        cost = s.get("cost", {})
+        for k in ("input", "output", "cacheRead", "cacheWrite"):
+            if k in cost:
+                agg_cost_by_type[k] = agg_cost_by_type.get(k, 0.0) + cost[k]
+        agg_cost += cost.get("total", 0.0)
+        agg_messages += s.get("messages", 0)
+    entry: dict = {"key": "(other)", "sessions": len(sessions)}
+    if agg_messages:
+        entry["messages"] = agg_messages
+    entry["tokens"] = agg_tokens
+    entry["cost"] = {**{k: round(v, 6) for k, v in agg_cost_by_type.items()},
+                     "total": round(agg_cost, 6)}
+    return entry
+
+
 @mcp.tool()
-async def get_usage_timeseries(key: str) -> str:
-    """Get usage over time for a specific session.
+async def list_sessions(
+    start_date: str = "",
+    end_date: str = "",
+    period: str = "day",
+    top_n: int = 5,
+    all_sessions: bool = False,
+) -> str:
+    """List sessions with usage breakdown, grouped by period.
+
+    By default shows the top N sessions by cost per period, with remaining
+    sessions aggregated into an "other" entry. Use all_sessions=true to
+    output every session chronologically instead.
+
+    Session keys returned here can be passed to get_session_logs for
+    per-request detail.
 
     Args:
-        key: The session key (visible in gateway UI or get_usage model entries).
+        start_date: Start date (YYYY-MM-DD). Defaults to 7 days ago.
+        end_date: End date (YYYY-MM-DD). Defaults to today.
+        period: Aggregation granularity — "day" (default), "week", or "month".
+        top_n: Number of heaviest sessions to show per period (default 5). Ignored when all_sessions is true.
+        all_sessions: If true, show all sessions chronologically without aggregation.
     """
+    today = date.today()
+    start = date.fromisoformat(start_date) if start_date else today - timedelta(days=6)
+    end = date.fromisoformat(end_date) if end_date else today
+
+    buckets = _compute_buckets(start, end, period)
     client = _get_client()
-    data = await client.request("sessions.usage.timeseries", {"key": key})
-    return json.dumps(data, indent=2)
+
+    result_periods = []
+    for b_start, b_end in buckets:
+        data = await client.request("sessions.usage", {
+            "startDate": b_start.isoformat(),
+            "endDate": b_end.isoformat(),
+            "limit": 500,
+        })
+        raw_sessions = data.get("sessions", [])
+        entries = [_build_session_entry(s) for s in raw_sessions]
+        # Drop zero-usage sessions
+        entries = [e for e in entries if e.get("cost", {}).get("total", 0)]
+
+        if all_sessions:
+            sessions_out = entries
+        else:
+            entries.sort(key=lambda e: e.get("cost", {}).get("total", 0), reverse=True)
+            top = entries[:top_n]
+            rest = entries[top_n:]
+            sessions_out = top
+            if rest:
+                sessions_out.append(_aggregate_sessions(rest))
+
+        result_periods.append({
+            "period": _period_label(b_start, b_end, period),
+            "sessions": sessions_out,
+        })
+
+    return json.dumps(result_periods, indent=2)
 
 
 @mcp.tool()
-async def get_usage_logs(key: str, limit: int = 50) -> str:
+async def get_session_logs(key: str, limit: int = 50) -> str:
     """Get per-request logs for a session: timestamps, token counts, costs, roles.
     Message content is excluded.
 
+    Use list_sessions to find session keys.
+
     Args:
-        key: The session key (visible in gateway UI or get_usage model entries).
+        key: The session key (from list_sessions output).
         limit: Max log entries to return (default 50).
     """
     client = _get_client()
